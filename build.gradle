@@ -23,12 +23,20 @@ dependencies {
 
     // This dependency is used by the application.
     implementation 'com.google.guava:guava:30.1.1-jre'
-    implementation group: 'org.lmdbjava', name: 'lmdbjava', version: '0.8.3'
+    implementation (group: 'org.lmdbjava', name: 'lmdbjava', version: '0.9.2') {
+        exclude group: 'org.lmdbjava', module : 'native'
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 application {
     // Define the main class for the application.
-    mainClass = 'lmdbjava.testbed.App'
+    mainClass = 'lmdbjavatestbed.App'
 }
 
 tasks.named('test') {
@@ -38,6 +46,6 @@ tasks.named('test') {
 
 tasks.jar {
     manifest {
-        attributes["Main-Class"] = "lmdbjava.testbed.App"
+        attributes["Main-Class"] = "lmdbjavatestbed.App"
     }
 }
