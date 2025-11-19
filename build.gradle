@@ -13,8 +13,10 @@ plugins {
 }
 
 repositories {
-    // Use Maven Central for resolving dependencies.
-    mavenLocal()
+    maven {
+        url "https://central.sonatype.com/repository/maven-snapshots"
+    }
+    //mavenLocal()
     mavenCentral()
 }
 
@@ -22,8 +24,8 @@ dependencies {
     // Use JUnit Jupiter for testing.
 //    testImplementation 'org.junit.jupiter:junit-jupiter:5.8.1'
 
-    //implementation (group: 'org.lmdbjava', name: 'lmdbjava', version: '0.9.2') {
     implementation (group: 'org.lmdbjava', name: 'lmdbjava', version: '1.0.0-SNAPSHOT') {
+    //implementation (group: 'org.lmdbjava', name: 'lmdbjava', version: '0.9.2') {
         // The native dep can be excluded if we are using our own embedded lib via
         // the prop lmdbjava.embedded.lib
 //        exclude group: 'org.lmdbjava', module : 'native'
