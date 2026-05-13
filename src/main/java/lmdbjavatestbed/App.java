@@ -3,51 +3,473 @@
  */
 package lmdbjavatestbed;
 
+import net.sourceforge.argparse4j.ArgumentParsers;
+import net.sourceforge.argparse4j.inf.ArgumentParser;
+import net.sourceforge.argparse4j.inf.ArgumentParserException;
+import net.sourceforge.argparse4j.inf.Namespace;
+import net.sourceforge.argparse4j.inf.Subparser;
+import net.sourceforge.argparse4j.inf.Subparsers;
+import org.lmdbjava.Cursor;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.DbiFlags;
 import org.lmdbjava.Env;
 import org.lmdbjava.EnvFlags;
+import org.lmdbjava.PutFlags;
 import org.lmdbjava.Txn;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.LongSummaryStatistics;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class App {
 
-    public static void main(String[] args) {
-        if (args == null || args.length < 1) {
-            System.err.println("ERROR: Expecting a path as the 1st argument");
-            System.exit(1);
-        }
-        System.out.println("os.version: " + System.getProperty("os.version"));
-        new App().run(Path.of(args[0]));
+    private static final boolean IS_DEBUG = Boolean.getBoolean("testbed.debug");
+    private static final boolean DO_CHECKS = areChecksEnabled();
+
+    private static final long KEY_RANDOM_SEED = 23984723847L;
+    private static final long VAL_RANDOM_SEED = 94598378303L;
+    private static final long VAL_LEN_RANDOM_SEED = 38587292L;
+
+    private static final String COMMAND_NAME_ATTR = "command";
+    private static final String DIR_ARG_NAME = "dir";
+    private static final String ROUNDS_ARG_NAME = "rounds";
+    private static final String ITERATIONS_ARG_NAME = "iterations";
+    private static final String MAP_SIZE_ARG_NAME = "size";
+    private static final String READ_THREADS_ARG_NAME = "threads";
+
+    private static final char DIR_ARG_CHAR = 'd';
+    private static final String DIR_ARG_HELP = "The directory where the LMDB environment will be written to. " +
+            "Will be created if it doesn't exist. If not set, a sub-directory will be created in " +
+            "/tmp.";
+    public static final String HELP_COMMAND = "help";
+    public static final String BASIC_COMMAND = "basic";
+    public static final String ALL_COMMAND = "all";
+    public static final String WRITE_DATA_COMMAND = "write";
+    public static final String READ_DATA_COMMAND = "read";
+    public static final int BASIC_MAP_SIZE = 1024 * 1024;
+    public static final String DB_NAME_BASIC = "basic";
+    public static final String DB_NAME_RANDOM = "random";
+    public static final String DB_NAME_SEQUENTIAL = "sequential";
+    public static final String DB_NAME_META = "meta";
+    public static final int MAX_DBS = 3;
+    public static final int MAX_VAL_LENGTH = 1_000;
+    public static final String LMDBJAVA_EXTRACT_DIR_PROP_KEY = "lmdbjava.extract.dir";
+    public static final String TESTBED_CHECK_PROP_KEY = "testbed.check";
+    private final ThreadLocal<Buffers> buffersThreadLocal = ThreadLocal.withInitial(() ->
+            Buffers.create(1024, 1024));
+    private final List<RunResult> runResults = new ArrayList<>();
+
+    private boolean isTempDir = false;
+    private Path dir;
+    private Path libraryDir = null;
+    private Path mdbFile;
+    private Path lockFile;
+    private RandomLongValues keys = null;
+    private RandomLongValues valueLengths = null;
+    private RandomLongValues values = null;
+    private Namespace namespace = null;
+
+    static void main(final String[] args) {
+        new App().run(args);
     }
 
-    private void run(final Path dir) {
-        System.out.println("Ensuring directory " + dir);
+    private void run(final String[] args) {
+        final ArgumentParser parser = createParser();
         try {
-            Files.createDirectories(dir);
-        } catch (IOException e) {
-            throw new RuntimeException("Unable to create directory " + dir, e);
-        }
+            namespace = parser.parseArgs(args);
 
-        final String propKey = "lmdbjava.extract.dir";
-        System.setProperty(propKey, dir.toAbsolutePath().normalize().toString());
-        System.out.println("Setting prop '" + propKey + "' to '" + dir.toAbsolutePath().normalize() + "'");
+            info("os.version           : %s", System.getProperty("os.version"));
+            info("Available processors : %s", Runtime.getRuntime().availableProcessors());
+            info("Debug mode           : %s", IS_DEBUG);
+            info("Perform checks       : %s", DO_CHECKS);
+            info("Rounds               : %s", namespace.getString(ROUNDS_ARG_NAME));
+            info("Iterations           : %s", Objects.requireNonNullElse(
+                    namespace.getString(ITERATIONS_ARG_NAME), "-"));
+            info("Read Threads         : %s", Objects.requireNonNullElse(
+                    namespace.getString(READ_THREADS_ARG_NAME), "-"));
+            info("Map size (bytes)     : %s", calculateMapSize(namespace.getInt(ITERATIONS_ARG_NAME)));
+
+            final String command = namespace.getString(COMMAND_NAME_ATTR);
+            switch (command) {
+                case HELP_COMMAND -> parser.printHelp();
+                case BASIC_COMMAND -> runBasicTest(namespace);
+                case ALL_COMMAND -> runAll(namespace);
+                case WRITE_DATA_COMMAND -> runWriteData(namespace);
+                case READ_DATA_COMMAND -> runReadData(namespace);
+                default -> {
+                    // Don't think we ever get here
+                    System.err.println("Unknown Command " + command);
+                    parser.printHelp();
+                    System.exit(1);
+                }
+            }
+
+            outputResults();
+            cleanUp();
+
+        } catch (final ArgumentParserException e) {
+            parser.handleError(e);
+            System.exit(1);
+        } catch (final NullPointerException e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.exit(1);
+        } catch (final Exception e) {
+//            final String msg = e.getMessage();
+            e.printStackTrace();
+//            if (msg != null) {
+//                errorAndExit(e.getMessage());
+//            } else {
+//                errorAndExit(e.getClass().getSimpleName());
+//            }
+        }
+        System.exit(0);
+    }
+
+    private void setupLibraryExtractDir() {
+        final String propKey = LMDBJAVA_EXTRACT_DIR_PROP_KEY;
+        try {
+            libraryDir = Files.createTempDirectory("lmdb-testbed-library-");
+            System.setProperty(LMDBJAVA_EXTRACT_DIR_PROP_KEY, libraryDir.toAbsolutePath().toString());
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static boolean areChecksEnabled() {
+        if (System.getProperty(TESTBED_CHECK_PROP_KEY) != null) {
+            return Boolean.getBoolean(TESTBED_CHECK_PROP_KEY);
+        } else {
+            // Checks on by default
+            return true;
+        }
+    }
+
+    private void outputResults() {
+        if (Files.exists(mdbFile)) {
+            info("Env Size on disk: %s", getEnvFileSize());
+        }
+        if (!runResults.isEmpty()) {
+            final Map<RunKey, List<RunResult>> groups = runResults.stream()
+                    .collect(Collectors.groupingBy(runResult -> runResult.runInfo.runKey));
+
+            final int rounds = namespace.getInt(ROUNDS_ARG_NAME);
+
+            groups.entrySet()
+                    .stream()
+                    .sorted(Comparator.comparing((Map.Entry<RunKey, List<RunResult>> entry) -> entry.getKey().operation)
+                            .thenComparing(entry -> entry.getKey().order))
+                    .forEach(entry -> {
+                        final RunKey runKey = entry.getKey();
+                        List<RunResult> runResultList = entry.getValue();
+
+                        System.out.println(runKey + ":");
+                        runResultList.stream()
+                                .sorted(Comparator.comparing(RunResult::round)
+                                        .thenComparing(RunResult::threadNo))
+                                .forEach(runResult -> {
+                                    System.out.println("  Round " + runResult.round()
+                                            + " thread " + runResult.threadNo()
+                                            + " - "
+                                            + runResult.duration.toMillis() + "ms, "
+                                            + runResult.duration.toNanos() + "ns");
+                                });
+
+                        String msg = "";
+                        if (rounds > 1) {
+                            // Drop the first run as the jvm is warming up
+                            runResultList = runResultList.stream()
+                                    .filter(runResult -> runResult.runInfo.round > 1)
+                                    .toList();
+                            msg = " (ignoring round 1)";
+                        }
+
+                        final LongSummaryStatistics statistics = runResultList.stream()
+                                .mapToLong(runResult -> runResult.duration.toMillis())
+                                .summaryStatistics();
+                        System.out.println("  Stats" + msg + ": " + statistics);
+                    });
+        }
+    }
+
+    /**
+     * Prefixes argName with '--' to make it into a long form argument.
+     */
+    private static String asArg(final String argName) {
+        return "--" + argName;
+    }
+
+    /**
+     * Prefixes name with '-' to make it into a short form argument.
+     */
+    private static String asArg(final char argChar) {
+        return "-" + argChar;
+    }
+
+    /**
+     * Returns both a short form and long form argument, e.g. -p and --password
+     */
+    private static String[] asArg(final char shortForm, final String longForm) {
+        return new String[]{asArg(shortForm), asArg(longForm)};
+    }
+
+    private static void error(final String message, final Object... args) {
+        System.err.printf("ERROR: " + message + "%n", args);
+    }
+
+    private static void errorAndExit(final String message, final Object... args) {
+        System.err.printf("ERROR: " + message + "%n", args);
+        System.exit(1);
+    }
+
+    private static void info(final String message, final Object... args) {
+        System.out.printf(message + "%n", args);
+    }
+
+    private void initDir(final Namespace namespace) {
+        if (dir == null) {
+            final String dirStr = namespace.getString(DIR_ARG_NAME);
+            if (dirStr == null || dirStr.isBlank()) {
+                try {
+                    isTempDir = true;
+                    dir = Files.createTempDirectory("lmdb-testbed-");
+                    info("No directory provided, creating a temporary one %s", dir);
+                } catch (IOException e) {
+                    errorAndExit("Unable to create temporary directory - %s", getExceptionMsg(e));
+                }
+            } else {
+                dir = Paths.get(dirStr).normalize().toAbsolutePath();
+//            info("Ensuring directory %s exists", dir);
+                try {
+                    Files.createDirectories(dir);
+                } catch (final IOException e) {
+                    errorAndExit("Failed to create directory %s - %s", dir.toString(), getExceptionMsg(e));
+                }
+            }
+            mdbFile = dir.resolve("data.mdb");
+            lockFile = dir.resolve("lock.mdb");
+        }
+        if (libraryDir == null) {
+            setupLibraryExtractDir();
+        }
+    }
+
+//    private void checkEnvNotPresent() {
+//        Objects.requireNonNull(dir);
+//        if (Files.exists(mdbFile)) {
+//            throw new IllegalStateException(String.format("File %s already exists", mdbFile.toAbsolutePath()));
+//        }
+//        if (Files.exists(lockFile)) {
+//            throw new IllegalStateException(String.format("File %s already exists", lockFile.toAbsolutePath()));
+//        }
+//    }
+
+    private void checkEnvPresent() {
+        Objects.requireNonNull(dir);
+        if (!Files.exists(mdbFile)) {
+            throw new IllegalStateException(String.format("File %s not found. Run the 'write' command first.",
+                    mdbFile.toAbsolutePath()));
+        }
+    }
+
+    private static ArgumentParser createParser() {
+        final String jarFileName = getJarFileName();
+        final ArgumentParser parser = ArgumentParsers.newFor("LMDBJava Testbed")
+                .build()
+                .defaultHelp(true)
+                .description(String.format("""
+                        Benchmarks the performance of LMDBJava.
+                        Usage:
+                        java --add-opens java.base/java.nio=ALL-UNNAMED \
+                        --add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+                        --enable-native-access=ALL-UNNAMED \
+                        -jar %s MODE [MODE_ARGS...]
+                        e.g:
+                        # Run a Hello World type test
+                        java ... -jar %s basic
+                        # Run 5 rounds of write and read tests, with 1mil entries
+                        java ... -jar %s all --rounds 5 --iterations 1000000 --threads 2 --dir /some/dir
+                        # Write 1mil random and sequential entries into an env.
+                        java ... -jar %s write --iterations 1000000 --dir /some/dir
+                        # Read all random and sequential entries from an existing env
+                        java ... -jar %s read --rounds 5 --dir /some/dir
+                        """, jarFileName, jarFileName, jarFileName, jarFileName, jarFileName));
+
+        final Subparsers subparsers = parser.addSubparsers();
+//        createHelpSubParser(subparsers);
+        createBasicTestSubParser(subparsers);
+        createAllSubParser(subparsers);
+        createWriteDataSubParser(subparsers);
+        createReadDataSubParser(subparsers);
+        return parser;
+    }
+
+    private static void createReadDataSubParser(final Subparsers subparsers) {
+        final Subparser readSubParser = subparsers.addParser(READ_DATA_COMMAND)
+                .setDefault(COMMAND_NAME_ATTR, READ_DATA_COMMAND)
+                .defaultHelp(true)
+                .description("Run a read test");
+        readSubParser.addArgument(asArg(DIR_ARG_CHAR, DIR_ARG_NAME))
+                .dest(DIR_ARG_NAME)
+                .required(false)
+                .help(DIR_ARG_HELP);
+        readSubParser.addArgument(asArg('r', ROUNDS_ARG_NAME))
+                .dest(ROUNDS_ARG_NAME)
+                .required(false)
+                .type(Integer.class)
+                .setDefault(1)
+                .help("The number of rounds of the benchmark to run.");
+//        readSubParser.addArgument(asArg('i', ITERATIONS_ARG_NAME))
+//                .dest(ITERATIONS_ARG_NAME)
+//                .required(false)
+//                .type(int.class)
+//                .setDefault(1000)
+//                .help("The number of iterations to use in a benchmark round");
+        readSubParser.addArgument(asArg('t', READ_THREADS_ARG_NAME))
+                .dest(READ_THREADS_ARG_NAME)
+                .required(false)
+                .type(Integer.class)
+                .setDefault(1)
+                .help("The maximum number of concurrent read threads");
+    }
+
+    private static void createWriteDataSubParser(final Subparsers subparsers) {
+        final Subparser writeDataSubParser = subparsers.addParser(WRITE_DATA_COMMAND)
+                .setDefault(COMMAND_NAME_ATTR, WRITE_DATA_COMMAND)
+                .defaultHelp(true)
+                .description("Populate an LMDB env with pseudo-random data");
+        writeDataSubParser.addArgument(asArg('r', ROUNDS_ARG_NAME))
+                .dest(ROUNDS_ARG_NAME)
+                .required(false)
+                .type(Integer.class)
+                .setDefault(1)
+                .help("The number of rounds of the benchmark to run.");
+        writeDataSubParser.addArgument(asArg(DIR_ARG_CHAR, DIR_ARG_NAME))
+                .dest(DIR_ARG_NAME)
+                .required(false)
+                .help(DIR_ARG_HELP);
+        writeDataSubParser.addArgument(asArg('i', ITERATIONS_ARG_NAME))
+                .dest(ITERATIONS_ARG_NAME)
+                .required(false)
+                .type(int.class)
+                .setDefault(1000)
+                .help("The number of iterations to use in a benchmark round");
+        writeDataSubParser.addArgument(asArg('s', MAP_SIZE_ARG_NAME))
+                .dest(MAP_SIZE_ARG_NAME)
+                .required(false)
+                .type(long.class)
+                .help("The maximum size of the LMDB env in bytes");
+    }
+
+    private static void createAllSubParser(final Subparsers subparsers) {
+        final Subparser benchmarkSubParser = subparsers.addParser(ALL_COMMAND)
+                .setDefault(COMMAND_NAME_ATTR, ALL_COMMAND)
+                .defaultHelp(true)
+                .description("Run a suite of benchmarks to check read/write performance.");
+        benchmarkSubParser.addArgument(asArg(DIR_ARG_CHAR, DIR_ARG_NAME))
+                .dest(DIR_ARG_NAME)
+                .required(false)
+                .help(DIR_ARG_HELP);
+        benchmarkSubParser.addArgument(asArg('r', ROUNDS_ARG_NAME))
+                .dest(ROUNDS_ARG_NAME)
+                .required(false)
+                .type(Integer.class)
+                .setDefault(1)
+                .help("The number of rounds of the benchmark to run.");
+        benchmarkSubParser.addArgument(asArg('i', ITERATIONS_ARG_NAME))
+                .dest(ITERATIONS_ARG_NAME)
+                .required(false)
+                .type(int.class)
+                .setDefault(1000)
+                .help("The number of iterations to use in a benchmark round");
+        benchmarkSubParser.addArgument(asArg('s', MAP_SIZE_ARG_NAME))
+                .dest(MAP_SIZE_ARG_NAME)
+                .required(false)
+                .type(long.class)
+                .help("The maximum size of the LMDB env in bytes");
+        benchmarkSubParser.addArgument(asArg('t', READ_THREADS_ARG_NAME))
+                .dest(READ_THREADS_ARG_NAME)
+                .required(false)
+                .type(Integer.class)
+                .setDefault(1)
+                .help("The maximum number of concurrent read threads");
+    }
+
+    private static void createBasicTestSubParser(final Subparsers subparsers) {
+        final Subparser basicSubParser = subparsers.addParser(BASIC_COMMAND)
+                .setDefault(COMMAND_NAME_ATTR, BASIC_COMMAND)
+                .defaultHelp(true)
+                .description("Run a basic test to get and put one entry to check it works.");
+        basicSubParser.addArgument(asArg(DIR_ARG_CHAR, DIR_ARG_NAME))
+                .dest(DIR_ARG_NAME)
+                .required(false)
+                .help(DIR_ARG_HELP);
+    }
+
+//    private static void createHelpSubParser(final Subparsers subparsers) {
+//        final Subparser helpSubParser = subparsers.addParser(HELP_COMMAND)
+//                .setDefault(COMMAND_NAME_ATTR, HELP_COMMAND)
+//                .defaultHelp(true)
+//                .description("Show help");
+//    }
+
+    private static void showHelp() {
+        final String jarFileName = getJarFileName();
+        System.err.printf("""
+                Usage:
+                java --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -jar %s MODE DIR [MODE_ARGS...]
+                Modes:
+                  help - Display this help.
+                  basic - Run a basic test to get and put one entry to check it works.
+                  benchmark - Run a suite of benchmarks to check read/write performance.
+                              Usage: benchmark /some/dir ROUNDS ITERATIONS
+                %n""", jarFileName);
+    }
+
+    private static String getJarFileName() {
+        return new java.io.File(App.class.getProtectionDomain()
+                .getCodeSource()
+                .getLocation()
+                .getPath())
+                .getName();
+    }
+
+    private void runBasicTest(final Namespace namespace) {
+        initDir(namespace);
+        deleteEnvOnDisk();
 
         try (Env<ByteBuffer> env = Env.create()
-                .setMapSize(10 * 1024 * 1024)
-                .setMaxDbs(1)
-                .setMaxReaders(5)
+                .setMapSize(BASIC_MAP_SIZE)
+                .setMaxDbs(MAX_DBS)
+                .setMaxReaders(1)
                 .open(dir.toFile(), EnvFlags.MDB_NOTLS)) {
 
-            final Dbi<ByteBuffer> db = env.openDbi("test-db", DbiFlags.MDB_CREATE);
+            final Dbi<ByteBuffer> db = env.openDbi(DB_NAME_BASIC, DbiFlags.MDB_CREATE);
 
-            final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(100);
-            final ByteBuffer valBuffer = ByteBuffer.allocateDirect(100);
+            final Buffers buffers = buffersThreadLocal.get();
+            final ByteBuffer keyBuffer = buffers.keyBuffer;
+            final ByteBuffer valBuffer = buffers.valueBuffer;
 
             final String key = "hello";
             final String value = "world";
@@ -58,20 +480,673 @@ public class App {
             valBuffer.flip();
 
             try (Txn<ByteBuffer> writeTxn = env.txnWrite()) {
-                System.out.println("Putting key: " + key + ", value: " + value);
+                info("Putting key: '%s', value: '%s'", key, value);
                 db.put(writeTxn, keyBuffer, valBuffer);
                 writeTxn.commit();
-                System.out.println("Put completed");
+                info("Put completed");
             }
 
             try (Txn<ByteBuffer> readTxn = env.txnRead()) {
-                System.out.println("Getting value for key: " + key);
+                info("Getting value for key: '%s'", key);
                 final ByteBuffer byteBuffer = db.get(readTxn, keyBuffer);
-                System.out.println("Value is '"
-                        + (byteBuffer != null ? StandardCharsets.UTF_8.decode(byteBuffer) : "null")
-                        + "'");
+                info("Value is '%s'",
+                        (byteBuffer != null ? StandardCharsets.UTF_8.decode(byteBuffer) : "null"));
             }
-            System.out.println("Done");
+            info("Done");
+        }
+        deleteEnvOnDisk();
+    }
+
+    private void runAll(final Namespace namespace) {
+        runWriteData(namespace);
+        runReadData(namespace);
+        // Clear up
+        deleteEnvOnDisk();
+    }
+
+    private void runReadData(final Namespace namespace) {
+        initDir(namespace);
+        checkEnvPresent();
+        final int rounds = Objects.requireNonNull(namespace.getInt(ROUNDS_ARG_NAME));
+        final int threads = Objects.requireNonNull(namespace.getInt(READ_THREADS_ARG_NAME));
+//        info("Rounds               : %s", rounds);
+//        info("Iterations           : %s", iterations);
+//        info("Read Threads         : %s", threads);
+
+        // Open pre-existing env/db
+        try (Env<ByteBuffer> env = Env.create()
+                .setMaxDbs(MAX_DBS)
+                .setMaxReaders(threads)
+                .open(dir.toFile(), EnvFlags.MDB_NOTLS, EnvFlags.MDB_RDONLY_ENV, EnvFlags.MDB_NOLOCK)) {
+
+            final Dbi<ByteBuffer> dbRandom = env.openDbi(DB_NAME_RANDOM);
+            final Dbi<ByteBuffer> dbSequential = env.openDbi(DB_NAME_SEQUENTIAL);
+            final Dbi<ByteBuffer> dbMeta = env.openDbi(DB_NAME_META);
+
+            // Read the number of iterations from the meta db
+            final String iterationsStr = getStringValue(env, dbMeta, ITERATIONS_ARG_NAME);
+            Objects.requireNonNull(iterationsStr);
+            final int iterations = Integer.parseInt(iterationsStr);
+            if (IS_DEBUG) {
+                info("Iterations           : %s", iterations);
+            }
+
+            initRandomValues(iterations);
+
+            final RunKey runKeySequential = new RunKey(iterations, threads, Order.SEQUENTIAL, Operation.READ, "Read");
+            final RunKey runKeyRandom = new RunKey(iterations, threads, Order.RANDOM, Operation.READ, "Read");
+
+            for (int round = 1; round <= rounds; round++) {
+                final int roundFinal = round;
+
+                if (threads > 1) {
+                    final CountDownLatch countDownLatch1 = new CountDownLatch(threads);
+                    try (ExecutorService executorService = Executors.newFixedThreadPool(threads)) {
+
+                        for (int threadNo = 1; threadNo <= threads; threadNo++) {
+                            final int finalThreadNo = threadNo;
+                            executorService.submit(() -> {
+                                final LongSupplier valSupplier = values.createSingleThreadedSupplier();
+                                final RunInfo runInfo = new RunInfo(roundFinal, finalThreadNo, runKeySequential);
+                                timed(runInfo, () -> {
+                                    if (IS_DEBUG) {
+                                        info("Starting sequential reads on thread " + finalThreadNo);
+                                    }
+                                    doSequentialReads(env, dbSequential, runInfo, valSupplier);
+                                });
+                                countDownLatch1.countDown();
+//                                info("Thread %s complete (sequential)", finalThreadNo);
+                            });
+                        }
+                        await(countDownLatch1);
+
+                        final CountDownLatch countDownLatch2 = new CountDownLatch(threads);
+                        for (int threadNo = 1; threadNo <= threads; threadNo++) {
+                            final int finalThreadNo = threadNo;
+                            executorService.submit(() -> {
+                                final LongSupplier keySupplier = keys.createSingleThreadedSupplier();
+                                final LongSupplier valLenSupplier = valueLengths.createSingleThreadedSupplier();
+                                final RunInfo runInfo = new RunInfo(roundFinal, finalThreadNo, runKeyRandom);
+                                timed(runInfo, () -> {
+                                    if (IS_DEBUG) {
+                                        info("Starting random reads on thread " + finalThreadNo);
+                                    }
+                                    doRandomReads(env, dbRandom, runInfo, keySupplier, valLenSupplier);
+                                });
+                                countDownLatch2.countDown();
+//                                info("Thread %s complete (random)", finalThreadNo);
+                            });
+                        }
+                        await(countDownLatch2);
+                    }
+                } else {
+                    final LongSupplier keySupplier = keys.createSingleThreadedSupplier();
+                    final LongSupplier valSupplier = values.createSingleThreadedSupplier();
+                    final LongSupplier valLenSupplier = valueLengths.createSingleThreadedSupplier();
+                    timed(new RunInfo(roundFinal, runKeySequential), () -> {
+                        doSequentialReads(env, dbSequential, new RunInfo(roundFinal, runKeySequential), valSupplier);
+                    });
+                    timed(new RunInfo(roundFinal, runKeyRandom), () -> {
+                        doRandomReads(env, dbRandom, new RunInfo(roundFinal, runKeyRandom), keySupplier, valLenSupplier);
+                    });
+                }
+            }
+        }
+    }
+
+    private void await(final CountDownLatch countDownLatch) {
+        try {
+            countDownLatch.await();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void timed(final RunInfo runInfo, final Runnable runnable) {
+        final Instant startTime = Instant.now();
+        runnable.run();
+        final Duration duration = Duration.between(startTime, Instant.now());
+        info(String.format("Completed round %s of %s in %s", runInfo.round, runInfo.runKey, duration));
+        runResults.add(new RunResult(runInfo, duration));
+    }
+
+//    private void timed(final String msg, final Runnable runnable) {
+//        final Instant startTime = Instant.now();
+//        runnable.run();
+//        final Duration duration = Duration.between(startTime, Instant.now());
+//        info(msg + " in " + duration + " (" + duration.toMillis() + "ms)");
+//    }
+
+    private void doSequentialReads(final Env<ByteBuffer> env,
+                                   final Dbi<ByteBuffer> db,
+                                   final RunInfo runInfo,
+                                   final LongSupplier valSupplier) {
+
+//        final Random keyRandom = new Random(KEY_RANDOM_SEED);
+        try (Txn<ByteBuffer> readTxn = env.txnRead()) {
+            try (Cursor<ByteBuffer> cursor = db.openCursor(readTxn)) {
+                final boolean foundFirst = cursor.first();
+                if (!foundFirst) {
+                    throw new IllegalStateException("No data");
+                }
+                int cnt = 0;
+                do {
+                    if (DO_CHECKS) {
+                        final ByteBuffer keyBuffer = cursor.key();
+                        // key should be 0 -> iterations
+                        final long key = keyBuffer.getLong();
+                        if (IS_DEBUG) {
+                            info("key: " + key);
+                        }
+                        if (key != cnt) {
+                            throw new IllegalStateException(String.format("Expecting key %s (got %s)", cnt, key));
+                        }
+                        // Assert the value
+                        final ByteBuffer valBuffer = cursor.val();
+                        final long valPrefix = valBuffer.getLong(0);
+                        final long expectedPrefix = valSupplier.getAsLong();
+                        if (valPrefix != expectedPrefix) {
+                            throw new IllegalStateException(String.format("Expecting value prefix %s (got %s)",
+                                    expectedPrefix, valPrefix));
+                        }
+                    }
+
+                    cnt++;
+                } while (cursor.next());
+
+                if (DO_CHECKS) {
+                    if (cnt != runInfo.runKey.iterations) {
+                        throw new IllegalStateException(String.format("Expecting %s entries (found %s)",
+                                runInfo.runKey.iterations, cnt));
+                    }
+                }
+            }
+        }
+    }
+
+    private void doRandomReads(final Env<ByteBuffer> env,
+                               final Dbi<ByteBuffer> db,
+                               final RunInfo runInfo,
+                               final LongSupplier keySupplier,
+                               final LongSupplier valLenSupplier) {
+
+        final Buffers buffers = buffersThreadLocal.get();
+        final ByteBuffer keyBuffer = buffers.keyBuffer;
+        final int iterations = runInfo.runKey.iterations;
+
+        try (Txn<ByteBuffer> readTxn = env.txnRead()) {
+            for (int i = 0; i < iterations; i++) {
+                final long key = putKey(keySupplier, keyBuffer);
+                if (IS_DEBUG) {
+                    info("Thread " + runInfo.threadNo + ", key: " + key);
+                }
+                final ByteBuffer valBuffer = db.get(readTxn, keyBuffer);
+                if (DO_CHECKS) {
+                    if (valBuffer == null) {
+                        throw new IllegalStateException(String.format("Entry not found for key %s", key));
+                    }
+                    final long valLen = valLenSupplier.getAsLong();
+                    final long expectedRemaining = Long.BYTES + valLen;
+                    if (IS_DEBUG) {
+                        info("Thread " + runInfo.threadNo + ", valLen: " + valLen);
+                    }
+                    if (valBuffer.remaining() != expectedRemaining) {
+                        info("throw");
+                        throw new IllegalStateException(String.format("Expecting remaining to be %s (found %s) for key %s",
+                                expectedRemaining, valBuffer.remaining(), key));
+                    }
+                }
+            }
+        }
+    }
+
+    private void runWriteData(final Namespace namespace) {
+        initDir(namespace);
+        deleteEnvOnDisk();
+        final int rounds = Objects.requireNonNull(namespace.getInt(ROUNDS_ARG_NAME));
+        final int iterations = Objects.requireNonNull(namespace.getInt(ITERATIONS_ARG_NAME));
+        final long mapSize = Objects.requireNonNullElseGet(
+                namespace.getLong(MAP_SIZE_ARG_NAME),
+                () -> calculateMapSize(iterations));
+
+        final RunKey runKeySequential = new RunKey(iterations, 1, Order.SEQUENTIAL, Operation.WRITE, "Write");
+        final RunKey runKeyRandom = new RunKey(iterations, 1, Order.RANDOM, Operation.WRITE, "Write");
+        initRandomValues(iterations);
+
+        for (int round = 1; round <= rounds; round++) {
+            if (round > 1) {
+                deleteEnvOnDisk();
+            }
+            try (Env<ByteBuffer> env = Env.create()
+                    .setMapSize(mapSize)
+                    .setMaxDbs(MAX_DBS)
+                    .setMaxReaders(1)
+                    .open(dir.toFile(), EnvFlags.MDB_NOTLS)) {
+
+                final Dbi<ByteBuffer> dbRandom = env.openDbi(DB_NAME_RANDOM, DbiFlags.MDB_CREATE);
+                final Dbi<ByteBuffer> dbSequential = env.openDbi(DB_NAME_SEQUENTIAL, DbiFlags.MDB_CREATE);
+                final Dbi<ByteBuffer> dbMeta = env.openDbi(DB_NAME_META, DbiFlags.MDB_CREATE);
+                // Record the iterations in the meta db, so 'read' mode can discover it
+                putStringValue(env, dbMeta, ITERATIONS_ARG_NAME, String.valueOf(iterations));
+
+                doSequentialWrites(env, new RunInfo(round, runKeySequential), iterations, dbSequential);
+                doRandomWrites(env, new RunInfo(round, runKeyRandom), iterations, dbRandom);
+//                info("Written %s entries", iterations);
+            }
+        }
+        // Don't delete the env as we may want to test the read from another process
+    }
+
+    private long calculateMapSize(final Integer iterations) {
+        if (iterations == null) {
+            return BASIC_MAP_SIZE;
+        } else {
+            // There is some other overhead not accounted for, but values are 0->1024 so
+            // plenty of spare room
+            long approxEntrySizeBytes = Long.BYTES + 1024;
+            long dbCount = 2;
+            long extraHeadroom = 1_024 * 1_024;
+            return (approxEntrySizeBytes * iterations * dbCount) + extraHeadroom;
+        }
+    }
+
+    private void initRandomValues(final int iterations) {
+        // For high iteration this will use a fair bit of mem, but
+        // it saves us having to compute the randoms on each iteration/round
+
+        // 0 -> Long.MAX_VALUE inc.
+        keys = Objects.requireNonNullElseGet(keys, () ->
+                new RandomLongValues(iterations, KEY_RANDOM_SEED));
+        // 0 -> 1,000 inc.
+        valueLengths = Objects.requireNonNullElseGet(valueLengths, () ->
+                new RandomLongValues(iterations, VAL_LEN_RANDOM_SEED, MAX_VAL_LENGTH));
+        // 0 -> Long.MAX_VALUE inc.
+        values = Objects.requireNonNullElseGet(values, () ->
+                new RandomLongValues(iterations, VAL_RANDOM_SEED));
+        info("Initialized random values");
+    }
+
+    private void doSequentialWrites(final Env<ByteBuffer> env,
+                                    final RunInfo runInfo,
+                                    final int iterations,
+                                    final Dbi<ByteBuffer> dbi) {
+        final Buffers buffers = buffersThreadLocal.get();
+        final ByteBuffer keyBuffer = buffers.keyBuffer;
+        final ByteBuffer valBuffer = buffers.valueBuffer;
+
+        final LongSupplier valueSupplier = values.createSingleThreadedSupplier();
+        final LongSupplier valueLenSupplier = valueLengths.createSingleThreadedSupplier();
+
+        try (Txn<ByteBuffer> writeTxn = env.txnWrite()) {
+            timed(runInfo, () -> {
+                for (long sequentialKey = 0; sequentialKey < iterations; sequentialKey++) {
+                    putKey(sequentialKey, keyBuffer);
+                    final long valLen = putSequentialValue(valBuffer, valueSupplier, valueLenSupplier);
+                    if (IS_DEBUG) {
+                        info(String.format("Key: %s, valLen: %s", sequentialKey, valLen));
+                    }
+                    final boolean didPut = dbi.put(
+                            writeTxn,
+                            keyBuffer,
+                            valBuffer,
+                            PutFlags.MDB_NOOVERWRITE,
+                            PutFlags.MDB_APPEND);
+                    if (DO_CHECKS && !didPut) {
+                        // Will need a different seed if this happens
+                        throw new IllegalStateException(String.format("Duplicate key %s", sequentialKey));
+                    }
+                }
+                // For very high iterations, a single commit at the end could be problematic
+                // Seems fine for 10mil iterations
+                writeTxn.commit();
+            });
+        }
+    }
+
+    private void doRandomWrites(final Env<ByteBuffer> env,
+                                final RunInfo runInfo,
+                                final int iterations,
+                                final Dbi<ByteBuffer> dbi) {
+        final Buffers buffers = buffersThreadLocal.get();
+        final ByteBuffer keyBuffer = buffers.keyBuffer;
+        final ByteBuffer valBuffer = buffers.valueBuffer;
+
+        final LongSupplier keySupplier = keys.createSingleThreadedSupplier();
+        final LongSupplier valSupplier = values.createSingleThreadedSupplier();
+        final LongSupplier valueLenSupplier = valueLengths.createSingleThreadedSupplier();
+
+        try (final Txn<ByteBuffer> writeTxn = env.txnWrite()) {
+            timed(runInfo, () -> {
+                for (int i = 0; i < iterations; i++) {
+                    final long key = putKey(keySupplier, keyBuffer);
+                    final long valLen = putValue(valBuffer, valSupplier, valueLenSupplier);
+                    if (IS_DEBUG) {
+                        info(String.format("Key: %s, valLen: %s", key, valLen));
+                    }
+                    final boolean didPut = dbi.put(writeTxn, keyBuffer, valBuffer, PutFlags.MDB_NOOVERWRITE);
+                    if (DO_CHECKS && !didPut) {
+                        // Will need a different seed if this happens
+                        throw new IllegalStateException(String.format("Duplicate key %s", key));
+                    }
+                }
+                writeTxn.commit();
+            });
+        }
+    }
+
+    private long getEnvFileSize() {
+        try (FileChannel imageFileChannel = FileChannel.open(mdbFile)) {
+            return imageFileChannel.size();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private long putKey(final LongSupplier keySupplier, final ByteBuffer keyBuffer) {
+        final long key = keySupplier.getAsLong();
+        keyBuffer.clear();
+        keyBuffer.putLong(key);
+        keyBuffer.flip();
+        return key;
+    }
+
+    private void putKey(final long key, final ByteBuffer keyBuffer) {
+        keyBuffer.clear();
+        keyBuffer.putLong(key);
+        keyBuffer.flip();
+    }
+
+    private long putValue(final ByteBuffer valueBuffer,
+                          final LongSupplier valSupplier,
+                          final LongSupplier valLenSupplier) {
+        final long valLen = valLenSupplier.getAsLong();
+        valueBuffer.clear();
+        // Put a known value at the start of the value so we can assert the value
+        try {
+            valueBuffer.putLong(valSupplier.getAsLong());
+            for (int i = 0; i < valLen; i++) {
+                valueBuffer.put((byte) 1);
+            }
+        } catch (final Exception e) {
+            throw new RuntimeException(String.format(
+                    "Error putting to buffer, capacity: %s, position: %s, valLen: %s - %s",
+                    valueBuffer.capacity(), valueBuffer.position(), valLen, e.getMessage()), e);
+        }
+        valueBuffer.flip();
+        return valLen;
+    }
+
+    private long putSequentialValue(final ByteBuffer valueBuffer,
+                                    final LongSupplier valSupplier,
+                                    final LongSupplier valLenSupplier) {
+        final long valLen = valLenSupplier.getAsLong();
+        valueBuffer.clear();
+        // Put a known value at the start of the value so we can assert the value
+        try {
+            valueBuffer.putLong(valSupplier.getAsLong());
+            for (long i = 0; i < valLen; i++) {
+                valueBuffer.put((byte) 1);
+            }
+        } catch (final Exception e) {
+            throw new RuntimeException(String.format(
+                    "Error putting to buffer, capacity: %s, position: %s, valLen: %s - %s",
+                    valueBuffer.capacity(), valueBuffer.position(), valLen, e.getMessage()), e);
+        }
+        valueBuffer.flip();
+        return valLen;
+    }
+
+    private void deleteEnvOnDisk() {
+        try {
+            boolean deletedMdb = false;
+            boolean deletedLock = false;
+            if (Files.exists(mdbFile)) {
+                Files.delete(mdbFile);
+                deletedMdb = true;
+            }
+            if (Files.exists(lockFile)) {
+                Files.delete(lockFile);
+                deletedLock = true;
+            }
+            if (deletedMdb && deletedLock) {
+                info("Deleted files %s and %s", mdbFile, lockFile);
+            } else if (deletedMdb) {
+                info("Deleted file %s", mdbFile);
+            } else if (deletedLock) {
+                info("Deleted file %s", lockFile);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private void cleanUp() {
+        if (isTempDir) {
+            try {
+                Files.deleteIfExists(dir);
+                if (IS_DEBUG) {
+                    info("Deleted temporary directory %s", dir);
+                }
+            } catch (final IOException e) {
+                error("Unable to delete directory %s - %s", dir, getExceptionMsg(e), e);
+            }
+        }
+
+        if (libraryDir != null) {
+            try {
+                if (Files.exists(libraryDir)) {
+                    try (Stream<Path> pathStream = Files.list(libraryDir)) {
+                        final List<Path> paths = pathStream.toList();
+                        for (final Path path : paths) {
+                            Files.delete(path);
+                        }
+                    }
+                    Files.delete(libraryDir);
+                    if (IS_DEBUG) {
+                        info("Deleted temporary directory %s", libraryDir);
+                    }
+                }
+            } catch (final IOException e) {
+                error("Unable to delete directory %s - %s", dir, getExceptionMsg(e), e);
+            }
+        }
+    }
+
+    private String getStringValue(final Env<ByteBuffer> env, final Dbi<ByteBuffer> dbi, final String key) {
+        final Buffers buffers = buffersThreadLocal.get();
+        final ByteBuffer keyBuffer = buffers.keyBuffer;
+
+        try (final Txn<ByteBuffer> readTxn = env.txnRead()) {
+            putString(keyBuffer, key);
+            final ByteBuffer valBuffer = dbi.get(readTxn, keyBuffer);
+            if (valBuffer == null) {
+                return null;
+            } else {
+                return getString(valBuffer);
+            }
+        }
+    }
+
+    private void putStringValue(final Env<ByteBuffer> env,
+                                final Dbi<ByteBuffer> dbi,
+                                final String key,
+                                final String value) {
+        final Buffers buffers = buffersThreadLocal.get();
+        final ByteBuffer keyBuffer = buffers.keyBuffer;
+        final ByteBuffer valBuffer = buffers.valueBuffer;
+
+        try (final Txn<ByteBuffer> writeTxn = env.txnWrite()) {
+            putString(keyBuffer, key);
+            putString(valBuffer, value);
+            dbi.put(writeTxn, keyBuffer, valBuffer);
+            writeTxn.commit();
+        }
+    }
+
+    private void putString(final ByteBuffer byteBuffer, final String str) {
+        byteBuffer.clear();
+        byteBuffer.put(str.getBytes(StandardCharsets.UTF_8));
+        byteBuffer.flip();
+    }
+
+    private String getString(final ByteBuffer byteBuffer) {
+        final String str = StandardCharsets.UTF_8.decode(byteBuffer).toString();
+        byteBuffer.flip();
+        return str;
+    }
+
+    private String getExceptionMsg(final Throwable t) {
+        final String msg = t.getMessage();
+        return msg == null
+                ? t.getClass().getSimpleName()
+                : msg;
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    @SuppressWarnings("UnnecessarySemicolon")
+    private enum Order {
+        RANDOM,
+        SEQUENTIAL,
+        ;
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    @SuppressWarnings("UnnecessarySemicolon")
+    private enum Operation {
+        READ,
+        WRITE,
+        ;
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+    private record RunKey(int iterations, int threads, Order order, Operation operation, String testName) {
+
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    private record RunInfo(int round, int threadNo, RunKey runKey) {
+
+        private RunInfo {
+        }
+
+        RunInfo(final int round, final RunKey runKey) {
+            this(round, 1, runKey);
+        }
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    private record RunResult(RunInfo runInfo, Duration duration) {
+
+        public int round() {
+            return runInfo.round();
+        }
+
+        public int threadNo() {
+            return runInfo.threadNo();
+        }
+
+        public RunKey runKey() {
+            return runInfo.runKey();
+        }
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    private record Buffers(ByteBuffer keyBuffer, ByteBuffer valueBuffer) {
+
+        private static Buffers create(final int keyCapacity, final int valueCapacity) {
+            return new Buffers(
+                    ByteBuffer.allocateDirect(keyCapacity),
+                    ByteBuffer.allocateDirect(valueCapacity));
+        }
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+    private static class RandomLongValues {
+        private final int iterations;
+        private final long[] values;
+
+        RandomLongValues(final int iterations, final long randomSeed) {
+            this(iterations, randomSeed, Long.MAX_VALUE);
+        }
+
+        RandomLongValues(final int iterations, final long randomSeed, final long bound) {
+            this.iterations = iterations;
+            this.values = new long[iterations];
+            final Random random = new Random(randomSeed);
+            for (int i = 0; i < iterations; i++) {
+                values[i] = random.nextLong(bound);
+            }
+        }
+
+        /**
+         * @return A supplier that will supply new values on each call, or -1 if exhausted.
+         */
+        LongSupplier createThreadSafeSupplier() {
+            final AtomicInteger atomicInteger = new AtomicInteger(-1);
+            return () -> {
+                final int idx = atomicInteger.getAndIncrement();
+                if (idx >= iterations) {
+                    return -1L;
+                } else {
+                    return values[idx];
+                }
+            };
+        }
+
+        /**
+         * @return A supplier that will supply new values on each call, or -1 if exhausted.
+         */
+        LongSupplier createSingleThreadedSupplier() {
+            return new SimpleLongSupplier(values);
+        }
+    }
+
+
+    // --------------------------------------------------------------------------------
+
+
+    /**
+     * NOT thread safe
+     */
+    private static class SimpleLongSupplier implements LongSupplier {
+        private final int iterations;
+        private final long[] values;
+        private int idx = -1;
+
+        SimpleLongSupplier(final long[] values) {
+            this.iterations = values.length;
+            this.values = values;
+        }
+
+        /**
+         * @return Next long, or -1 if there are no more longs.
+         */
+        public long getAsLong() {
+            idx++;
+            if (idx >= iterations) {
+                return -1L;
+            } else {
+                return values[idx];
+            }
         }
     }
 }
