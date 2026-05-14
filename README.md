@@ -2,10 +2,10 @@
 
 This is a test bed for evaluating the performance of [LmdbJava](https://github.com/lmdbjava/lmdbjava) on different file systems.
 
-It currently has four different modes; `basic`, `write`, `read`, `all`.
+It currently has four different modes; `basic`, `lock`, `write`, `read`, `all`.
 
 
-## Basic Mode
+## _Basic_ Mode
 
 This performs a very simple Hello World style test.
 It is mainly to ensure LmdbJava/LMDB works at the most basic level on an environment.
@@ -19,8 +19,12 @@ It is mainly to ensure LmdbJava/LMDB works at the most basic level on an environ
 
 ```sh
 export JAVA_OPTS="--add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --enable-native-access=ALL-UNNAMED"
-java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar basic
+java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar basic --dir /some/dir
 ```
+
+* `dir` - The directory to create the LMDB env in.
+  It will be created if it doesn't exist.
+  If not provided, a temporary directory will be created.
 
 The following is typical output:
 
@@ -47,7 +51,59 @@ Deleted files /tmp/lmdb-testbed-4115318091746521981/data.mdb and /tmp/lmdb-testb
 ```
 
 
-## Write Mode
+## _Lock_ Mode
+
+This performs a very simple Hello World style test.
+It is mainly to ensure LmdbJava/LMDB works at the most basic level on an environment.
+
+1. Create a new LMDB Env.
+1. Create a new LMDB DB.
+1. Put two entries on two different threads.
+1. Get the same entry, outputting the key/value.
+
+### Usage:
+
+```sh
+export JAVA_OPTS="--add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --enable-native-access=ALL-UNNAMED"
+java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar lock --dir /some/dir
+```
+
+* `dir` - The directory to create the LMDB env in.
+  It will be created if it doesn't exist.
+  If not provided, a temporary directory will be created.
+
+The following is typical output:
+
+```text
+os.version           : 6.12.85-1-MANJARO
+Available processors : 24
+Debug mode           : false
+Perform checks       : true
+Rounds               : -
+Iterations           : -
+Read Threads         : -
+Map size (bytes)     : 1048576
+No directory provided, creating a temporary one /tmp/lmdb-testbed-12185487274368713970
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.lmdbjava.ByteBufferProxy$UnsafeProxy (file:lmdbjava-0.8.2-testbed-all.jar)
+WARNING: Please consider reporting this to the maintainers of class org.lmdbjava.ByteBufferProxy$UnsafeProxy
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+Acquired write txn on main thread
+Putting key: 'txn1', value: 'val1'
+Sleeping for 1s on main thread
+  Starting async thread
+Put completed on main thread
+  Acquired write txn on async thread
+  Putting key: 'txn2', value: 'val2'
+  Put completed on async thread in PT1.000199463S
+key1: 'txn1', val1: 'val1'
+key2: 'txn2', val2: 'val2'
+Done
+Deleted files /tmp/lmdb-testbed-12185487274368713970/data.mdb and /tmp/lmdb-testbed-12185487274368713970/lock.mdb
+```
+
+
+## _Write_ Mode
 
 This mode performs two sets of write operations, sequential and random.
 Each set is timed.
@@ -99,6 +155,7 @@ java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar write --rounds 5 --iterati
 * `iterations` - The number of entries to write in each set.
 * `dir` - The directory to create the LMDB env in.
   It will be created if it doesn't exist.
+  If not provided, a temporary directory will be created.
 
 Writing **cannot** be multi-threaded due to the way LMDB is designed.
 
@@ -107,7 +164,7 @@ _Write_ mode should be run in isolation, i.g. no other hosts/processing trying t
 Once the data is written it also writes the value of `iterations` to a DB named `meta` that can be read by _Read_ mode.
 
 
-## Read Mode
+## _Read_ Mode
 
 This mode performs two sets of read operations, _sequential_ and _random_.
 Each set is timed.
@@ -144,11 +201,13 @@ java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar read --rounds 5 --threads 
 * `threads` - How many threads to perform the two sets of read operations on.
   Each thread will perform exactly the same work.
 * `dir` - The directory containing the LMDB env.
+  It will be created if it doesn't exist.
+  If not provided, a temporary directory will be created.
 
 _Read_ mode can be run by multiple processes/hosts concurrently.
 
 
-## All Mode
+## _All_ Mode
 
 This mode essentially combines _Write_ and _read_ mode.
 
@@ -170,6 +229,8 @@ java ${JAVA_OPTS} -jar lmdbjava-0.8.2-testbed-all.jar all --rounds 5 --iteration
 * `threads` - How many threads to perform the two sets of read operations on.
   Each thread will perform exactly the same work.
 * `dir` - The directory containing the LMDB env.
+  It will be created if it doesn't exist.
+  If not provided, a temporary directory will be created.
 
 
 ## System Properties

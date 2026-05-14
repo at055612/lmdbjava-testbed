@@ -34,6 +34,7 @@ import java.util.LongSummaryStatistics;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -64,6 +65,7 @@ public class App {
             "/tmp.";
     public static final String HELP_COMMAND = "help";
     public static final String BASIC_COMMAND = "basic";
+    public static final String LOCK_COMMAND = "lock";
     public static final String ALL_COMMAND = "all";
     public static final String WRITE_DATA_COMMAND = "write";
     public static final String READ_DATA_COMMAND = "read";
@@ -103,7 +105,8 @@ public class App {
             info("Available processors : %s", Runtime.getRuntime().availableProcessors());
             info("Debug mode           : %s", IS_DEBUG);
             info("Perform checks       : %s", DO_CHECKS);
-            info("Rounds               : %s", namespace.getString(ROUNDS_ARG_NAME));
+            info("Rounds               : %s", Objects.requireNonNullElse(
+                    namespace.getString(ROUNDS_ARG_NAME), "-"));
             info("Iterations           : %s", Objects.requireNonNullElse(
                     namespace.getString(ITERATIONS_ARG_NAME), "-"));
             info("Read Threads         : %s", Objects.requireNonNullElse(
@@ -114,6 +117,7 @@ public class App {
             switch (command) {
                 case HELP_COMMAND -> parser.printHelp();
                 case BASIC_COMMAND -> runBasicTest(namespace);
+                case LOCK_COMMAND -> runLockingTest(namespace);
                 case ALL_COMMAND -> runAll(namespace);
                 case WRITE_DATA_COMMAND -> runWriteData(namespace);
                 case READ_DATA_COMMAND -> runReadData(namespace);
@@ -275,20 +279,11 @@ public class App {
         }
     }
 
-//    private void checkEnvNotPresent() {
-//        Objects.requireNonNull(dir);
-//        if (Files.exists(mdbFile)) {
-//            throw new IllegalStateException(String.format("File %s already exists", mdbFile.toAbsolutePath()));
-//        }
-//        if (Files.exists(lockFile)) {
-//            throw new IllegalStateException(String.format("File %s already exists", lockFile.toAbsolutePath()));
-//        }
-//    }
-
     private void checkEnvPresent() {
         Objects.requireNonNull(dir);
         if (!Files.exists(mdbFile)) {
-            throw new IllegalStateException(String.format("File %s not found. Run the 'write' command first.",
+            throw new IllegalStateException(String.format(
+                    "File %s not found. Run the 'write' command first to create the env.",
                     mdbFile.toAbsolutePath()));
         }
     }
@@ -308,17 +303,19 @@ public class App {
                         e.g:
                         # Run a Hello World type test
                         java ... -jar %s basic
+                        # Run a simple test of the write txn locking
+                        java ... -jar %s lock
                         # Run 5 rounds of write and read tests, with 1mil entries
                         java ... -jar %s all --rounds 5 --iterations 1000000 --threads 2 --dir /some/dir
                         # Write 1mil random and sequential entries into an env.
                         java ... -jar %s write --iterations 1000000 --dir /some/dir
                         # Read all random and sequential entries from an existing env
                         java ... -jar %s read --rounds 5 --dir /some/dir
-                        """, jarFileName, jarFileName, jarFileName, jarFileName, jarFileName));
+                        """, jarFileName, jarFileName, jarFileName, jarFileName, jarFileName, jarFileName));
 
         final Subparsers subparsers = parser.addSubparsers();
-//        createHelpSubParser(subparsers);
         createBasicTestSubParser(subparsers);
+        createLockTestSubParser(subparsers);
         createAllSubParser(subparsers);
         createWriteDataSubParser(subparsers);
         createReadDataSubParser(subparsers);
@@ -340,12 +337,6 @@ public class App {
                 .type(Integer.class)
                 .setDefault(1)
                 .help("The number of rounds of the benchmark to run.");
-//        readSubParser.addArgument(asArg('i', ITERATIONS_ARG_NAME))
-//                .dest(ITERATIONS_ARG_NAME)
-//                .required(false)
-//                .type(int.class)
-//                .setDefault(1000)
-//                .help("The number of iterations to use in a benchmark round");
         readSubParser.addArgument(asArg('t', READ_THREADS_ARG_NAME))
                 .dest(READ_THREADS_ARG_NAME)
                 .required(false)
@@ -427,24 +418,15 @@ public class App {
                 .help(DIR_ARG_HELP);
     }
 
-//    private static void createHelpSubParser(final Subparsers subparsers) {
-//        final Subparser helpSubParser = subparsers.addParser(HELP_COMMAND)
-//                .setDefault(COMMAND_NAME_ATTR, HELP_COMMAND)
-//                .defaultHelp(true)
-//                .description("Show help");
-//    }
-
-    private static void showHelp() {
-        final String jarFileName = getJarFileName();
-        System.err.printf("""
-                Usage:
-                java --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED -jar %s MODE DIR [MODE_ARGS...]
-                Modes:
-                  help - Display this help.
-                  basic - Run a basic test to get and put one entry to check it works.
-                  benchmark - Run a suite of benchmarks to check read/write performance.
-                              Usage: benchmark /some/dir ROUNDS ITERATIONS
-                %n""", jarFileName);
+    private static void createLockTestSubParser(final Subparsers subparsers) {
+        final Subparser basicSubParser = subparsers.addParser(LOCK_COMMAND)
+                .setDefault(COMMAND_NAME_ATTR, LOCK_COMMAND)
+                .defaultHelp(true)
+                .description("Run a simple test to check that LMDB locking is working for concurrent writes.");
+        basicSubParser.addArgument(asArg(DIR_ARG_CHAR, DIR_ARG_NAME))
+                .dest(DIR_ARG_NAME)
+                .required(false)
+                .help(DIR_ARG_HELP);
     }
 
     private static String getJarFileName() {
@@ -473,11 +455,8 @@ public class App {
 
             final String key = "hello";
             final String value = "world";
-
-            keyBuffer.put(key.getBytes(StandardCharsets.UTF_8));
-            keyBuffer.flip();
-            valBuffer.put(value.getBytes(StandardCharsets.UTF_8));
-            valBuffer.flip();
+            putString(keyBuffer, key);
+            putString(valBuffer, value);
 
             try (Txn<ByteBuffer> writeTxn = env.txnWrite()) {
                 info("Putting key: '%s', value: '%s'", key, value);
@@ -495,6 +474,99 @@ public class App {
             info("Done");
         }
         deleteEnvOnDisk();
+    }
+
+    private void runLockingTest(final Namespace namespace) {
+        initDir(namespace);
+        deleteEnvOnDisk();
+
+        try (Env<ByteBuffer> env = Env.create()
+                .setMapSize(BASIC_MAP_SIZE)
+                .setMaxDbs(MAX_DBS)
+                .setMaxReaders(2)
+                .open(dir.toFile(), EnvFlags.MDB_NOTLS)) {
+
+            final Dbi<ByteBuffer> db = env.openDbi(DB_NAME_BASIC, DbiFlags.MDB_CREATE);
+
+            final Buffers buffers = buffersThreadLocal.get();
+            if (IS_DEBUG) {
+                info("buffers: %s", System.identityHashCode(buffers));
+            }
+
+            final CompletableFuture<Void> completableFuture;
+            try (Txn<ByteBuffer> writeTxn = env.txnWrite()) {
+                info("Acquired write txn on main thread");
+                info("Putting key: 'txn1', value: 'val1'");
+                db.put(writeTxn,
+                        putString(buffers.keyBuffer, "txn1"),
+                        putString(buffers.valueBuffer, "val1"));
+
+                // While main thread has the write txn open, try to open a write txn on
+                // another thread. This should block untill the existing write txn is
+                // closed
+                completableFuture = CompletableFuture.runAsync(() -> {
+                    info("  Starting async thread");
+                    final Buffers buffers2 = buffersThreadLocal.get();
+                    if (IS_DEBUG) {
+                        info("  buffers2: %s", System.identityHashCode(buffers2));
+                    }
+                    final Instant txn2StartTime = Instant.now();
+                    try (Txn<ByteBuffer> writeTxn2 = env.txnWrite()) {
+                        info("  Acquired write txn on async thread");
+                        info("  Putting key: 'txn2', value: 'val2'");
+                        db.put(writeTxn2,
+                                putString(buffers2.keyBuffer, "txn2"),
+                                putString(buffers2.valueBuffer, "val2"));
+                        writeTxn2.commit();
+                        info("  Put completed on async thread in %s",
+                                Duration.between(txn2StartTime, Instant.now()));
+                    }
+                });
+
+                // Sleep before committing
+                info("Sleeping for 1s on main thread");
+                sleep(Duration.ofSeconds(1));
+                writeTxn.commit();
+                info("Put completed on main thread");
+            }
+
+            // Wait for the async thread to complete
+            await(completableFuture);
+
+            try (Txn<ByteBuffer> readTxn = env.txnRead()) {
+                final String val1 = getString(db.get(readTxn, putString(buffers.keyBuffer, "txn1")));
+                info("key1: 'txn1', val1: '" + val1 + "'");
+                final String val2 = getString(db.get(readTxn, putString(buffers.keyBuffer, "txn2")));
+                info("key2: 'txn2', val2: '" + val2 + "'");
+
+                if (DO_CHECKS) {
+                    if (!val1.equals("val1")) {
+                        throw new RuntimeException("Expecting value 'val1' (got '" + val1 + "') for key 'txn1'");
+                    }
+                    if (!val2.equals("val2")) {
+                        throw new RuntimeException("Expecting value 'val2' (got '" + val2 + "') for key 'txn2'");
+                    }
+                }
+            }
+            info("Done");
+        }
+        deleteEnvOnDisk();
+    }
+
+    private static void await(final CompletableFuture<Void> completableFuture) {
+        try {
+            completableFuture.get();
+        } catch (final Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void sleep(final Duration duration) {
+        try {
+            Thread.sleep(duration.toMillis());
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private void runAll(final Namespace namespace) {
@@ -542,7 +614,6 @@ public class App {
                 if (threads > 1) {
                     final CountDownLatch countDownLatch1 = new CountDownLatch(threads);
                     try (ExecutorService executorService = Executors.newFixedThreadPool(threads)) {
-
                         for (int threadNo = 1; threadNo <= threads; threadNo++) {
                             final int finalThreadNo = threadNo;
                             executorService.submit(() -> {
@@ -555,7 +626,9 @@ public class App {
                                     doSequentialReads(env, dbSequential, runInfo, valSupplier);
                                 });
                                 countDownLatch1.countDown();
-//                                info("Thread %s complete (sequential)", finalThreadNo);
+                                if (IS_DEBUG) {
+                                    info("Thread %s complete (sequential)", finalThreadNo);
+                                }
                             });
                         }
                         await(countDownLatch1);
@@ -574,7 +647,9 @@ public class App {
                                     doRandomReads(env, dbRandom, runInfo, keySupplier, valLenSupplier);
                                 });
                                 countDownLatch2.countDown();
-//                                info("Thread %s complete (random)", finalThreadNo);
+                                if (IS_DEBUG) {
+                                    info("Thread %s complete (random)", finalThreadNo);
+                                }
                             });
                         }
                         await(countDownLatch2);
@@ -609,13 +684,6 @@ public class App {
         info(String.format("Completed round %s of %s in %s", runInfo.round, runInfo.runKey, duration));
         runResults.add(new RunResult(runInfo, duration));
     }
-
-//    private void timed(final String msg, final Runnable runnable) {
-//        final Instant startTime = Instant.now();
-//        runnable.run();
-//        final Duration duration = Duration.between(startTime, Instant.now());
-//        info(msg + " in " + duration + " (" + duration.toMillis() + "ms)");
-//    }
 
     private void doSequentialReads(final Env<ByteBuffer> env,
                                    final Dbi<ByteBuffer> db,
@@ -676,7 +744,7 @@ public class App {
 
         try (Txn<ByteBuffer> readTxn = env.txnRead()) {
             for (int i = 0; i < iterations; i++) {
-                final long key = putKey(keySupplier, keyBuffer);
+                final long key = putLong(keySupplier, keyBuffer);
                 if (IS_DEBUG) {
                     info("Thread " + runInfo.threadNo + ", key: " + key);
                 }
@@ -731,7 +799,6 @@ public class App {
 
                 doSequentialWrites(env, new RunInfo(round, runKeySequential), iterations, dbSequential);
                 doRandomWrites(env, new RunInfo(round, runKeyRandom), iterations, dbRandom);
-//                info("Written %s entries", iterations);
             }
         }
         // Don't delete the env as we may want to test the read from another process
@@ -780,11 +847,12 @@ public class App {
         try (Txn<ByteBuffer> writeTxn = env.txnWrite()) {
             timed(runInfo, () -> {
                 for (long sequentialKey = 0; sequentialKey < iterations; sequentialKey++) {
-                    putKey(sequentialKey, keyBuffer);
+                    putLong(sequentialKey, keyBuffer);
                     final long valLen = putSequentialValue(valBuffer, valueSupplier, valueLenSupplier);
                     if (IS_DEBUG) {
                         info(String.format("Key: %s, valLen: %s", sequentialKey, valLen));
                     }
+                    // We are putting in key order, so use MDB_APPEND for faster puts
                     final boolean didPut = dbi.put(
                             writeTxn,
                             keyBuffer,
@@ -818,7 +886,7 @@ public class App {
         try (final Txn<ByteBuffer> writeTxn = env.txnWrite()) {
             timed(runInfo, () -> {
                 for (int i = 0; i < iterations; i++) {
-                    final long key = putKey(keySupplier, keyBuffer);
+                    final long key = putLong(keySupplier, keyBuffer);
                     final long valLen = putValue(valBuffer, valSupplier, valueLenSupplier);
                     if (IS_DEBUG) {
                         info(String.format("Key: %s, valLen: %s", key, valLen));
@@ -842,7 +910,7 @@ public class App {
         }
     }
 
-    private long putKey(final LongSupplier keySupplier, final ByteBuffer keyBuffer) {
+    private long putLong(final LongSupplier keySupplier, final ByteBuffer keyBuffer) {
         final long key = keySupplier.getAsLong();
         keyBuffer.clear();
         keyBuffer.putLong(key);
@@ -850,10 +918,11 @@ public class App {
         return key;
     }
 
-    private void putKey(final long key, final ByteBuffer keyBuffer) {
+    private ByteBuffer putLong(final long longVal, final ByteBuffer keyBuffer) {
         keyBuffer.clear();
-        keyBuffer.putLong(key);
+        keyBuffer.putLong(longVal);
         keyBuffer.flip();
+        return keyBuffer;
     }
 
     private long putValue(final ByteBuffer valueBuffer,
@@ -932,6 +1001,7 @@ public class App {
             }
         }
 
+        // Remove the LMDB library file that is extracted from the jar
         if (libraryDir != null) {
             try {
                 if (Files.exists(libraryDir)) {
@@ -952,7 +1022,12 @@ public class App {
         }
     }
 
-    private String getStringValue(final Env<ByteBuffer> env, final Dbi<ByteBuffer> dbi, final String key) {
+    /**
+     * Open readTxn, get value for key, close readTxn, return value.
+     */
+    private String getStringValue(final Env<ByteBuffer> env,
+                                  final Dbi<ByteBuffer> dbi,
+                                  final String key) {
         final Buffers buffers = buffersThreadLocal.get();
         final ByteBuffer keyBuffer = buffers.keyBuffer;
 
@@ -967,6 +1042,9 @@ public class App {
         }
     }
 
+    /**
+     * Open writeTxn, put entry, commit, close writeTxn.
+     */
     private void putStringValue(final Env<ByteBuffer> env,
                                 final Dbi<ByteBuffer> dbi,
                                 final String key,
@@ -983,12 +1061,19 @@ public class App {
         }
     }
 
-    private void putString(final ByteBuffer byteBuffer, final String str) {
+    /**
+     * Clear buffer, put str, flip, return buffer.
+     */
+    private ByteBuffer putString(final ByteBuffer byteBuffer, final String str) {
         byteBuffer.clear();
         byteBuffer.put(str.getBytes(StandardCharsets.UTF_8));
         byteBuffer.flip();
+        return byteBuffer;
     }
 
+    /**
+     * Get str from buffer, flip, return str.
+     */
     private String getString(final ByteBuffer byteBuffer) {
         final String str = StandardCharsets.UTF_8.decode(byteBuffer).toString();
         byteBuffer.flip();
