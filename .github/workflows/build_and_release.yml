@@ -121,8 +121,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: "${ACTIONS_SCRIPTS_DIR}/create_github_release.sh"
 
+      - name: Publish docker image to container registry
         id: publish_docker_image
-        - name: Publish docker image to container registry
         if: ${{ env.BUILD_IS_RELEASE == 'true' }}
         env:
           # Github provided secret
