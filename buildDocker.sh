@@ -59,6 +59,8 @@ main() {
 
   ./gradlew clean build
 
+  mkdir -p ./docker/build
+
   rm -f ./docker/build/*.jar
 
   # Copy the jar from the gradle build into the docker context,
