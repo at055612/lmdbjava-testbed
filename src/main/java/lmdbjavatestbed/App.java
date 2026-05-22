@@ -153,11 +153,13 @@ public class App {
 
     private void setupLibraryExtractDir() {
         final String propKey = LMDBJAVA_EXTRACT_DIR_PROP_KEY;
-        try {
-            libraryDir = Files.createTempDirectory("lmdb-testbed-library-");
-            System.setProperty(LMDBJAVA_EXTRACT_DIR_PROP_KEY, libraryDir.toAbsolutePath().toString());
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+        if (System.getProperty(propKey) == null) {
+            try {
+                libraryDir = Files.createTempDirectory("lmdb-testbed-library-");
+                System.setProperty(propKey, libraryDir.toAbsolutePath().toString());
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 

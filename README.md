@@ -254,7 +254,24 @@ export JAVA_OPTS="${JAVA_OPTS} -Dtestbed.check=false"
 ```
 
 
-### System Requirements
+## System Requirements
 
 LmdbJava Test Bed requires a Java 25 JVM to run.
 `JAVA_HOME` should be set to the home of the Java 25 JVM and `java` should be on the path.
+
+
+## Docker
+
+To build the Docker image and run the testbed in Docker do:
+
+```sh
+./buildDocker.sh run
+```
+
+This will run in `basic` mode.
+To run in another mode, just supply the jar arguments, e.g. 
+
+```sh
+./buildDocker.sh run all -i 100
+```
+

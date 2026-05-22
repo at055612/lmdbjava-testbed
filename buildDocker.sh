@@ -50,14 +50,29 @@ main() {
   DOCKER_IMAGE="at055612/lmdb-testbed:${DOCKER_IMAGE_TAG}"
 
   local arg1="$1";
+  # Remove the first arg from the args arr
+  shift || true
 
   setup_echo_colours
 
   pushd "${SCRIPT_DIR}" > /dev/null
 
-  ./gradlew clean build shadowJar
+  ./gradlew clean build
 
-  cp ./build/libs/lmdbjava-testbed-all.jar ./docker/build/
+  rm -f ./docker/build/*.jar
+
+  # Copy the jar from the gradle build into the docker context,
+  # renaming as we go
+  local counter=0
+  for file in ./build/libs/lmdbjava-*-testbed-all.jar; do
+    #echo "jar file: ${file}"
+    if [[ $counter -gt 0 ]]; then
+      echo "Found too many jar files in ./build/libs/" >&2
+      exit 1
+    fi
+    cp "${file}" ./docker/build/lmdbjava-testbed-all.jar
+    ((counter++)) || true
+  done
 
   docker build \
     --tag "${DOCKER_IMAGE}" \
@@ -66,9 +81,17 @@ main() {
   if [[ "${arg1}" = "run" ]]; then
     echo -e "${GREEN}Running image ${BLUE}${DOCKER_IMAGE}${NC}"
 
-    docker run "${DOCKER_IMAGE}"
+    docker run \
+      --mount type=tmpfs,destination=/tmp \
+      "${DOCKER_IMAGE}" \
+      "$@"
+
   elif [[ "${arg1}" = "bash" ]]; then
-    docker run -it --entrypoint /bin/bash "${DOCKER_IMAGE}"
+    docker run \
+      --mount type=tmpfs,destination=/tmp \
+      -it \
+      --entrypoint /bin/bash \
+      "${DOCKER_IMAGE}"
   fi
 }
 

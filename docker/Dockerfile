@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21.0.8_9-jdk-alpine
+FROM eclipse-temurin:25.0.3_9-jdk-alpine-3.23@sha256:30d9f87d702c2c1c601ed0d31e0c88ea1ea474ee7676cda7b7a59e759181c4dd
 
 USER root
 
@@ -6,19 +6,24 @@ RUN apk add --update --no-cache \
         bash \
         su-exec \
         tini \
-    && apk --no-cache upgrade
+    && apk --no-cache upgrade \
+    && mkdir -p /lmdb_testbed \
+    && addgroup --gid 1000 -S lmdb \
+    && adduser --uid 1000 -D -S -h / -s /sbin/nologin -G lmdb lmdb \
+    && set -ex \
+    && chown -R 1000:1000 /lmdb_testbed
 
-        #lmdb \
 
-RUN mkdir -p /lmdb_testbed
+COPY --chown=lmdb:lmdb \
+  ./build/lmdbjava-testbed-all.jar \
+  /lmdb_testbed/
 
-RUN addgroup --gid 1000 -S lmdb \
-  && adduser --uid 1000 -D -S -h / -s /sbin/nologin -G lmdb lmdb;
+COPY --chown=lmdb:lmdb \
+  ./entrypoint.sh \
+  /lmdb_testbed/
 
-RUN set -ex \
-  && chown -R 1000:1000 /lmdb_testbed
-
-COPY --chown=lmdb:lmdb ./build/lmdbjava-testbed-all.jar /lmdb_testbed/
+VOLUME /lmdb_testbed
+VOLUME /tmp
 
 WORKDIR /lmdb_testbed
 
@@ -26,34 +31,7 @@ USER lmdb
 
 # run entrypoint script inside tini for better unix process handling, 
 # see https://github.com/krallin/tini/issues/8
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/sbin/tini", "--", "/lmdb_testbed/entrypoint.sh"]
 
-# This one lets LMDBJava choose its own lib to use from the 'native' dep
-CMD [ \
-  "java", \
-  "--add-opens", "java.base/java.nio=ALL-UNNAMED", \
-  "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED", \
-  "--add-opens", "java.base/java.lang=ALL-UNNAMED", \
-  "-jar", "/lmdb_testbed/lmdbjava-testbed-all.jar", \
-  "/tmp/lmdb"]
-
-# This one requires the apk installs lmdb
-#CMD [ \
-  #"java", \
-  #"-Dlmdbjava.native.lib=/usr/lib/liblmdb.so.0.0.0", \
-  #"--add-opens", "java.base/java.nio=ALL-UNNAMED", \
-  #"--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED", \
-  #"--add-opens", "java.base/java.lang=ALL-UNNAMED", \
-  #"-jar", "/lmdb_testbed/lmdbjava-testbed-all.jar", \
-  #"/tmp/lmdb"]
-
-# This one requires that the alpine x86_64 lmdb lib is included in the lmdbjavatestbed classpath.
-#CMD [ \
-  #"java", \
-  #"-Dlmdbjava.embedded.lib=lmdbjavatestbed/x86_64-linux-musl.so", \
-  #"--add-opens", "java.base/java.nio=ALL-UNNAMED", \
-  #"--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED", \
-  #"--add-opens", "java.base/java.lang=ALL-UNNAMED", \
-  #"-jar", "/lmdb_testbed/lmdbjava-testbed-all.jar", \
-  #"/tmp/lmdb"]
-
+# Run the basic test using the bundled LMDB binary
+CMD [ "basic", "-d", "/tmp/lmdb_testbed" ]
