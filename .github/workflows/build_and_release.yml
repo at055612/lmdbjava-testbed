@@ -52,7 +52,7 @@ jobs:
               echo "BUILD_TAG=${tag}"
               echo "DOCKER_IMAGE_TAG=${tag}"
             else
-              echo "DOCKER_IMAGE_TAG=local-snapshot
+              echo "DOCKER_IMAGE_TAG=local-snapshot"
             fi
 
             if [[ ${GITHUB_REF} =~ ^refs/heads/ ]]; then
