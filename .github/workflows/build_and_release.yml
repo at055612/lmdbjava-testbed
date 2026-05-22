@@ -68,7 +68,7 @@ jobs:
 
             echo "DOCKER_NAMESPACE=${GITHUB_REPOSITORY_OWNER}"
             echo "DOCKER_IMAGE_NAME=${{github.event.repository.name}}"
-            echo "DOCKER_IMAGE_TAG=${BUILD_TAG}"
+            echo "DOCKER_IMAGE_TAG=${BUILD_TAG:-local-snapshot}"
           } >> $GITHUB_ENV
 
         # Separate step to show what is visible across steps
