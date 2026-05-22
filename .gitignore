@@ -29,4 +29,6 @@ replay_pid*
 # Ignore Gradle build output directory
 build
 
-docker/build
+/docker/build
+
+/release_artefacts

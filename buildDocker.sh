@@ -68,7 +68,7 @@ main() {
     
 
   mkdir -p ./docker/build
-  mkdir -p ./build/release_artefacts
+  mkdir -p ./release_artefacts
 
   rm -f ./docker/build/*.jar
 
@@ -84,8 +84,9 @@ main() {
     local filename
     filename="$(basename "${filename}")"
     cp "${file}" ./docker/build/lmdbjava-testbed-all.jar
+
     if [[ "${DOCKER_IMAGE_TAG}" != "local-SNAPSHOT" ]]; then
-      cp "${file}" "./build/release_artefacts/${filename}"
+      cp "${file}" "./release_artefacts/${filename}"
     fi
     ((counter++)) || true
   done
