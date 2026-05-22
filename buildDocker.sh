@@ -51,7 +51,7 @@ main() {
   DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-lmdbjava-testbed}"
   DOCKER_IMAGE_TAG="${DOCKER_IMAGE_TAG:-local-SNAPSHOT}"
 
-  DOCKER_IMAGE="${DOCKER_NAMESPACE}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
+  DOCKER_IMAGE="ghcr.io/${DOCKER_NAMESPACE}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
 
   local arg1="$1";
   # Remove the first arg from the args arr
@@ -91,6 +91,7 @@ main() {
     ((counter++)) || true
   done
 
+  echo -e "${GREEN}Building image ${BLUE}${DOCKER_IMAGE}${NC}"
   docker build \
     --tag "${DOCKER_IMAGE}" \
     ./docker
