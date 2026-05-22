@@ -7,7 +7,7 @@ on:
 jobs:
   build-project:
     runs-on: ubuntu-24.04
-    env:
+    #env:
       # Static env vars
 
       # Github runners limited to 2 cores, 7Gb RAM
