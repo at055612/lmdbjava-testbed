@@ -10,6 +10,7 @@ jobs:
     # Define the perms of the ephemeral GH token
     permissions:
       contents: write
+      packages: write
     #env:
       # Static env vars
 
