@@ -7,6 +7,9 @@ on:
 jobs:
   build-project:
     runs-on: ubuntu-24.04
+    # Define the perms of the ephemeral GH token
+    permissions:
+      contents: write
     #env:
       # Static env vars
 
