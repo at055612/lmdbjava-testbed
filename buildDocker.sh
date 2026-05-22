@@ -61,22 +61,32 @@ main() {
 
   pushd "${SCRIPT_DIR}" > /dev/null
 
-  ./gradlew clean build
+  ./gradlew \
+    -Pversion="${BUILD_TAG:-SNAPSHOT}" \
+    clean \
+    build 
+    
 
   mkdir -p ./docker/build
+  mkdir -p ./build/release_artefacts
 
   rm -f ./docker/build/*.jar
 
   # Copy the jar from the gradle build into the docker context,
   # renaming as we go
   local counter=0
-  for file in ./build/libs/lmdbjava-*-testbed-all.jar; do
+  for file in ./build/libs/lmdbjava-*-testbed-*all.jar; do
     #echo "jar file: ${file}"
     if [[ $counter -gt 0 ]]; then
       echo "Found too many jar files in ./build/libs/" >&2
       exit 1
     fi
+    local filename
+    filename="$(basename "${filename}")"
     cp "${file}" ./docker/build/lmdbjava-testbed-all.jar
+    if [[ "${DOCKER_IMAGE_TAG}" != "local-SNAPSHOT" ]]; then
+      cp "${file}" "./build/release_artefacts/${filename}"
+    fi
     ((counter++)) || true
   done
 

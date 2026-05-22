@@ -50,7 +50,7 @@ main() {
   setup_echo_colours
 
   echo -e "${GREEN}Run gradle build${NC}"
-  ./gradlew clean build
+  #./gradlew -Pversion="${BUILD_TAG}" clean build
 
   ./buildDocker.sh run
 

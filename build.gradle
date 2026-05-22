@@ -22,7 +22,24 @@ repositories {
     mavenCentral()
 }
 
+//if the project has a value for the passed property (i.e from the cmd line via -PpropName=xxx)
+//use that, else use a default value
+ext.getPropertyOrDefault = { propName, defaultValue ->
+    def val
+    if (project.hasProperty(propName)
+            && project.getProperty(propName) != "unspecified"
+            && project.getProperty(propName) != "") {
+        val = project.getProperty(propName)
+        logger.info("Using property [$propName] with value [$val]")
+    } else {
+        val = defaultValue
+        logger.info("Property [$propName] has no value, using default value [$val]")
+    }
+    return val
+}
+
 def lmdbJavaVersion = "0.8.2"
+def version = getPropertyOrDefault('version', 'SNAPSHOT')
 
 dependencies {
     // Use JUnit Jupiter for testing.
@@ -52,6 +69,7 @@ jar.enabled = false
 shadowJar {
     // Set the fat jar name
     archiveBaseName = "lmdbjava-${lmdbJavaVersion}-testbed"
+    archiveVersion = "${version}"
 }
 
 tasks.withType(JavaCompile) {
