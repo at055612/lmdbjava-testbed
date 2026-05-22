@@ -46,8 +46,12 @@ debug() {
 main() {
   IS_DEBUG=false
   SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
-  DOCKER_IMAGE_TAG="local-SNAPSHOT"
-  DOCKER_IMAGE="at055612/lmdb-testbed:${DOCKER_IMAGE_TAG}"
+
+  DOCKER_NAMESPACE="${DOCKER_NAMESPACE:-at055612}"
+  DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-lmdbjava-testbed}"
+  DOCKER_IMAGE_TAG="${DOCKER_IMAGE_TAG:-local-SNAPSHOT}"
+
+  DOCKER_IMAGE="${DOCKER_NAMESPACE}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
 
   local arg1="$1";
   # Remove the first arg from the args arr
@@ -84,14 +88,16 @@ main() {
     echo -e "${GREEN}Running image ${BLUE}${DOCKER_IMAGE}${NC}"
 
     docker run \
+      --rm \
       --mount type=tmpfs,destination=/tmp \
       "${DOCKER_IMAGE}" \
       "$@"
 
   elif [[ "${arg1}" = "bash" ]]; then
     docker run \
-      --mount type=tmpfs,destination=/tmp \
+      --rm \
       -it \
+      --mount type=tmpfs,destination=/tmp \
       --entrypoint /bin/bash \
       "${DOCKER_IMAGE}"
   fi

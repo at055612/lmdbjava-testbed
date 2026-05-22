@@ -65,6 +65,10 @@ jobs:
             else
               echo "BUILD_IS_RELEASE=false"
             fi
+
+            echo "DOCKER_NAMESPACE=${GITHUB_REPOSITORY_OWNER}"
+            echo "DOCKER_IMAGE_NAME=${{github.event.repository.name}}"
+            echo "DOCKER_IMAGE_TAG=${BUILD_TAG}"
           } >> $GITHUB_ENV
 
         # Separate step to show what is visible across steps
@@ -85,6 +89,9 @@ jobs:
             "BUILD_IS_PULL_REQUEST" "$BUILD_IS_PULL_REQUEST" \
             "BUILD_IS_RELEASE" "$BUILD_IS_RELEASE" \
             "ACTIONS_SCRIPTS_DIR" "$ACTIONS_SCRIPTS_DIR" \
+            "DOCKER_NAMESPACE" "$DOCKER_NAMESPACE" \
+            "DOCKER_IMAGE_NAME" "$DOCKER_IMAGE_NAME" \
+            "DOCKER_IMAGE_TAG" "$DOCKER_IMAGE_TAG" \
             "PWD" "$PWD" \
             "HOME" "$HOME"
 
@@ -106,11 +113,12 @@ jobs:
           ./ci_build.sh
           echo -e "${GREEN}Finished running build script${NC}"
 
-        #id: create_release
-        #- name: Release to GitHub
-        #if: ${{ env.BUILD_IS_RELEASE == 'true' }}
-        #env:
-          ## Github provided secret
-          #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        #run: "${ACTIONS_SCRIPTS_DIR}/create_github_release.sh"
+        id: publish_docker_image
+        - name: Publish docker image to container registry
+        if: ${{ env.BUILD_IS_RELEASE == 'true' }}
+        env:
+          # Github provided secret
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: "${ACTIONS_SCRIPTS_DIR}/publish_to_container_registry.sh"
 
