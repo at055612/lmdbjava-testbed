@@ -113,6 +113,14 @@ jobs:
           ./ci_build.sh
           echo -e "${GREEN}Finished running build script${NC}"
 
+      - name: Release to GitHub
+        id: create_release
+        if: ${{ env.BUILD_IS_RELEASE == 'true' }}
+        env:
+          # Github provided secret
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: "${ACTIONS_SCRIPTS_DIR}/create_github_release.sh"
+
         id: publish_docker_image
         - name: Publish docker image to container registry
         if: ${{ env.BUILD_IS_RELEASE == 'true' }}
